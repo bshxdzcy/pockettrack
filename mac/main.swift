@@ -3,8 +3,8 @@ import Network
 import ApplicationServices
 import Security
 
-let port: UInt16 = 49671
 let dryRun = CommandLine.arguments.contains("--dry-run") || CommandLine.arguments.contains("--self-test")
+let port: UInt16 = dryRun ? (UInt16(ProcessInfo.processInfo.environment["POCKETTRACK_TEST_PORT"] ?? "49671") ?? 49671) : 49671
 let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("PocketTrack")
 try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
 let tokenURL = support.appendingPathComponent("pairing-token")
@@ -26,30 +26,53 @@ final class Input {
     var lastClick = 0.0
     var clicks: Int64 = 0
     let source = CGEventSource(stateID: .privateState)
+    var canPost = AXIsProcessTrusted()
+    var pointer: CGPoint?
+    var lastMoveAt = 0.0
+    var screenBounds: [CGRect] = []
+    var scrollX = 0.0
+    var scrollY = 0.0
+    init() { source?.localEventsSuppressionInterval = 0; refreshDisplays() }
+    func refreshDisplays() {
+        var n: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &n)
+        var displays = [CGDirectDisplayID](repeating: 0, count: Int(n))
+        CGGetActiveDisplayList(n, &displays, &n)
+        screenBounds = displays.map { CGDisplayBounds($0) }
+    }
+    func currentPoint() -> CGPoint {
+        if let pointer, ProcessInfo.processInfo.systemUptime-lastMoveAt < 0.15 { return pointer }
+        return CGEvent(source: nil)?.location ?? .zero
+    }
     func post(_ event: CGEvent?) {
-        guard !dryRun, AXIsProcessTrusted(), let event else { return }
+        guard !dryRun, canPost, let event else { return }
         // Preserve physical modifiers without observing the user's keystrokes.
         var flags = CGEventSource.flagsState(.hidSystemState)
-        if event.type == .flagsChanged { flags.remove(.maskAlternate) }
-        if option { flags.insert(.maskAlternate) }
+        if event.type == .flagsChanged {
+            flags.remove(.maskAlternate)
+            flags.remove(CGEventFlags(rawValue: 0x40)) // NX_DEVICERALTKEYMASK
+            if flags.rawValue & 0x20 != 0 { flags.insert(.maskAlternate) }
+        }
+        if option { flags.insert(.maskAlternate); flags.insert(CGEventFlags(rawValue: 0x40)) }
         event.flags = flags
         event.post(tap: .cghidEventTap)
     }
     func mouse(_ type: CGEventType, _ button: CGMouseButton = .left) {
-        let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: CGEvent(source: nil)?.location ?? .zero, mouseButton: button)
+        let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: currentPoint(), mouseButton: button)
         event?.setIntegerValueField(.mouseEventClickState, value: clicks)
         post(event)
     }
     func setOption(_ down: Bool) {
         guard option != down else { return }
         option = down
-        let event = CGEvent(keyboardEventSource: source, virtualKey: 58, keyDown: down)
+        let event = CGEvent(keyboardEventSource: source, virtualKey: 61, keyDown: down)
         event?.type = .flagsChanged
         post(event)
     }
     func release() {
         if dragging { mouse(.leftMouseUp); dragging = false }
         setOption(false)
+        pointer = nil; scrollX = 0; scrollY = 0
     }
     func handle(_ parts: [Substring]) -> Bool {
         guard let command = parts.first else { return false }
@@ -62,19 +85,21 @@ final class Input {
         case "MOVE", "SCROLL":
             guard parts.count == 3, let x = Double(parts[1]), let y = Double(parts[2]), x.isFinite, y.isFinite, abs(x) <= 500, abs(y) <= 500 else { return false }
             if command == "MOVE" {
-                var p = CGEvent(source: nil)?.location ?? .zero
+                var p = currentPoint()
                 p.x += x; p.y += y
-                var displayCount: UInt32 = 0
-                CGGetActiveDisplayList(0, nil, &displayCount)
-                var displays = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-                CGGetActiveDisplayList(displayCount, &displays, &displayCount)
-                let bounds = displays.map { CGDisplayBounds($0) }
+                let bounds = screenBounds
                 if !bounds.contains(where: { $0.contains(p) }), let nearest = bounds.map({ CGRect -> CGPoint in
                     CGPoint(x: min(max(p.x, CGRect.minX), CGRect.maxX - 1), y: min(max(p.y, CGRect.minY), CGRect.maxY - 1))
                 }).min(by: { hypot($0.x-p.x, $0.y-p.y) < hypot($1.x-p.x, $1.y-p.y) }) { p = nearest }
+                pointer = p; lastMoveAt = ProcessInfo.processInfo.systemUptime
                 post(CGEvent(mouseEventSource: source, mouseType: dragging ? .leftMouseDragged : .mouseMoved, mouseCursorPosition: p, mouseButton: .left))
             } else {
-                post(CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: Int32(y), wheel2: Int32(x), wheel3: 0))
+                scrollX += x; scrollY += y
+                let dx = Int32(scrollX), dy = Int32(scrollY)
+                scrollX -= Double(dx); scrollY -= Double(dy)
+                if dx != 0 || dy != 0 {
+                    post(CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0))
+                }
             }
         case "CLICK":
             guard parts.count == 2, parts[1] == "L" || parts[1] == "R" else { return false }
@@ -105,7 +130,9 @@ final class Server {
     var status = "等待 USB 连接"
     var timer: Timer?
     func start() throws {
-        let parameters = NWParameters.tcp
+        let tcp = NWProtocolTCP.Options()
+        tcp.noDelay = true
+        let parameters = NWParameters(tls: nil, tcp: tcp)
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!)
         let listener = try NWListener(using: parameters)
         self.listener = listener
@@ -150,7 +177,7 @@ final class Server {
                     if !self.authenticated {
                         guard line == "AUTH \(token)" else { self.disconnect(); return }
                         self.authenticated = true; self.status = "USB 已连接"
-                        c.send(content: Data("OK\n".utf8), completion: .contentProcessed { _ in })
+                        c.send(content: Data((dryRun ? "OK DRY\n" : "OK\n").utf8), completion: .contentProcessed { _ in })
                     } else {
                         guard self.input.handle(line.split(separator: " ")) else { self.disconnect(); return }
                         if line == "PING" { c.send(content: Data("PONG\n".utf8), completion: .contentProcessed { _ in }) }
@@ -169,11 +196,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusLabel: NSTextField!
     var timer: Timer?
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if dryRun {
+            do { try server.start() } catch { fputs("Test server failed\n", stderr); exit(1) }
+            return
+        }
         let menu = NSMenu(); let item = NSMenuItem(); menu.addItem(item)
         let sub = NSMenu(); sub.addItem(withTitle: "退出 PocketTrack", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); item.submenu = sub
         NSApp.mainMenu = menu
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 490, height: 345), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "PocketTrack · USB 触控板"
+        window.title = "PocketTrack 0.1.1 · USB 触控板"
         let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 18
         stack.translatesAutoresizingMaskIntoConstraints = false
         window.contentView!.addSubview(stack)
@@ -181,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let title = NSTextField(labelWithString: "把手机，变成手边的触控板。")
         title.font = .systemFont(ofSize: 23, weight: .semibold); stack.addArrangedSubview(title)
         statusLabel = NSTextField(wrappingLabelWithString: "启动中"); stack.addArrangedSubview(statusLabel)
-        let details = NSTextField(wrappingLabelWithString: "USB 本地传输 · 不读取手机内容\n单指移动 / 轻点点击 / 双指滚动\nMac Option 键继续照常使用\n手机按电源键或切到后台，立即停止。")
+        let details = NSTextField(wrappingLabelWithString: "USB 本地传输 · 不读取手机内容\n单指移动 / 轻点点击 / 双指滚动\n手机音量上键 = 右 Option（⌥）\n手机按电源键或切到后台，立即停止。")
         details.font = .systemFont(ofSize: 14); stack.addArrangedSubview(details)
         let permission = NSButton(title: "打开辅助功能授权", target: self, action: #selector(openPermission)); stack.addArrangedSubview(permission)
         stack.addArrangedSubview(NSButton(title: "立即断开并释放按键", target: self, action: #selector(stop)))
@@ -189,13 +220,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do { try server.start() } catch { server.status = "端口不可用：\(error.localizedDescription)" }
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let access = dryRun ? "测试模式 · 不发送输入" : (AXIsProcessTrusted() ? "辅助功能已授权" : "需要辅助功能授权才能控制 Mac")
+            self.server.input.canPost = AXIsProcessTrusted()
+            self.server.input.refreshDisplays()
+            let access = dryRun ? "测试模式 · 不发送输入" : (self.server.input.canPost ? "辅助功能已授权" : "需要辅助功能授权才能控制 Mac")
             self.statusLabel.stringValue = "\(self.server.status)\n\(access) · 已接收 \(self.server.input.count) 个事件"
         }
     }
     @objc func openPermission() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
     }
     @objc func stop() { server.disconnect() }
@@ -215,13 +246,22 @@ if CommandLine.arguments.contains("--self-test") {
     precondition(!input.handle(["EXEC", "bad"]))
     precondition(input.handle(["MOVE", "3", "-2"]))
     precondition(input.handle(["SCROLL", "1", "2"]))
-    print("PASS: input validation, modifier release, drag release, move and scroll")
+    let origin = CGPoint(x: CGDisplayBounds(CGMainDisplayID()).midX, y: CGDisplayBounds(CGMainDisplayID()).midY)
+    input.pointer = origin; input.lastMoveAt = ProcessInfo.processInfo.systemUptime
+    for _ in 0..<100 { precondition(input.handle(["MOVE", "0.5", "0"])) }
+    precondition(abs(input.pointer!.x - origin.x - 50) < 0.001, "Rapid moves lost displacement")
+    input.scrollX = 0
+    for _ in 0..<3 { precondition(input.handle(["SCROLL", "0.25", "0"])) }
+    precondition(abs(input.scrollX - 0.75) < 0.001)
+    precondition(input.handle(["SCROLL", "0.25", "0"]))
+    precondition(abs(input.scrollX) < 0.001, "Fractional horizontal scroll was lost")
+    print("PASS: input validation, release, 100 rapid cumulative moves, fractional horizontal scrolling")
     exit(0)
 }
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(dryRun ? .prohibited : .regular)
 // Graceful terminal termination also releases any input held by this process.
 signal(SIGTERM, SIG_IGN)
 signal(SIGINT, SIG_IGN)

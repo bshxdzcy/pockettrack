@@ -51,11 +51,11 @@ public final class MainActivity extends Activity {
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
         LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(Color.rgb(18,22,30));
         int p=(int)(24*getResources().getDisplayMetrics().density); root.setPadding(p,p*2,p,p);
-        root.addView(text("PocketTrack", 32));
+        root.addView(text("PocketTrack 0.1.1", 32));
         root.addView(text("手机触控，Mac 接收。", 20));
         status = text(token.isEmpty() ? "请在 Mac 运行连接脚本完成 USB 配对。" : "USB 已配对 · 点击下方开始", 15); root.addView(status);
         root.addView(text("单指移动 · 轻点点击 · 双指滚动\n双指轻点右键 · 单指长按拖动\n电源键 / 返回 / 切后台：退出", 16));
-        CheckBox option = new CheckBox(this); option.setText("音量上键代替 Option（按住说话）"); option.setTextColor(Color.WHITE); option.setChecked(volumeOption); option.setOnCheckedChangeListener((v,c)->volumeOption=c); root.addView(option);
+        CheckBox option = new CheckBox(this); option.setText("音量上键代替右 Option（按住说话）"); option.setTextColor(Color.WHITE); option.setChecked(volumeOption); option.setOnCheckedChangeListener((v,c)->volumeOption=c); root.addView(option);
         root.addView(button("开始触控", () -> startMode(false)));
         root.addView(button("开始纯黑触控", () -> startMode(true)));
         root.addView(text("纯黑模式保留触摸，不是真正关屏。\n只经 USB 传输手势与按键；不访问手机麦克风、照片、联系人或通知。", 13));
@@ -111,6 +111,8 @@ public final class MainActivity extends Activity {
             canvas.drawText("PocketTrack · 触控中",24*density,80*density,paint);
             paint.setTextSize(13*density);
             canvas.drawText("电源键退出 · 单指移动 · 双指滚动",24*density,114*density,paint);
+            if(link!=null && link.roundTripMs>=0) canvas.drawText("USB 往返 " + link.roundTripMs + " ms · 音量上键 = 右 Option",24*density,144*density,paint);
+            postInvalidateDelayed(500);
         }
         float cx(MotionEvent e) {float n=0; for(int i=0;i<e.getPointerCount();i++) n+=e.getX(i); return n/e.getPointerCount()/density;}
         float cy(MotionEvent e) {float n=0; for(int i=0;i<e.getPointerCount();i++) n+=e.getY(i); return n/e.getPointerCount()/density;}
@@ -130,7 +132,7 @@ public final class MainActivity extends Activity {
                     if(travel>10) ui.removeCallbacks(hold);
                     if(!canceled && maximum<=2 && (maximum==1 || e.getPointerCount()==2)) {
                         String cmd=e.getPointerCount()==2 ? "SCROLL" : "MOVE";
-                        float scale=cmd.equals("MOVE") ? 1.6f : 1.1f;
+                        float scale=cmd.equals("MOVE") ? 2.8f : 1.1f;
                         dx=Math.max(-500,Math.min(500,dx*scale));dy=Math.max(-500,Math.min(500,dy*scale));
                         if(Math.abs(dx)+Math.abs(dy)>0.01) send(String.format(Locale.US,"%s %.2f %.2f",cmd,dx,dy));
                     }
@@ -157,6 +159,8 @@ public final class MainActivity extends Activity {
         final String secret;
         volatile boolean running=true;
         volatile Socket socket;
+        volatile long lastReply, pingSent;
+        volatile long roundTripMs = -1;
         Link(String secret){super("PocketTrack-USB");this.secret=secret;}
         void send(String message){if(!queue.offer(message))close();}
         void close(){running=false;queue.clear();Socket s=socket;if(s!=null)try{s.close();}catch(IOException ignored){}interrupt();}
@@ -171,15 +175,29 @@ public final class MainActivity extends Activity {
                 if(!"OK".equals(in.readLine()))throw new IOException("Pairing failed");
                 if(!running)return;
                 ui.post(()->enterPad(this));
+                lastReply=android.os.SystemClock.elapsedRealtime();
+                Thread reader = new Thread(() -> {
+                    try {
+                        while(running) {
+                            if(!"PONG".equals(in.readLine()))throw new IOException("Disconnected");
+                            lastReply=android.os.SystemClock.elapsedRealtime();
+                            roundTripMs=Math.max(0,lastReply-pingSent);
+                        }
+                    } catch(Exception ignored) { close(); }
+                }, "PocketTrack-Heartbeat");
+                reader.setDaemon(true);reader.start();
                 long lastPing=0;
                 while(running) {
-                    String message=queue.poll(50,TimeUnit.MILLISECONDS);
-                    if(message!=null){out.write(message);out.write('\n');out.flush();}
+                    String message=queue.poll(8,TimeUnit.MILLISECONDS);
+                    if(message!=null){
+                        MotionBatch batch=new MotionBatch();batch.add(message);
+                        for(int i=0;i<127;i++) { String next=queue.poll();if(next==null)break;batch.add(next); }
+                        out.write(batch.finish());out.flush();
+                    }
                     long now=android.os.SystemClock.elapsedRealtime();
+                    if(now-lastReply>2000)throw new IOException("Heartbeat timeout");
                     if(now-lastPing>500){
-                        out.write("PING\n");out.flush();
-                        if(!"PONG".equals(in.readLine()))throw new IOException("Disconnected");
-                        lastPing=now;
+                        pingSent=now;out.write("PING\n");out.flush();lastPing=now;
                     }
                 }
             } catch(Exception ignored) {

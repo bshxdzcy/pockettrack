@@ -1,5 +1,7 @@
 # PocketTrack
 
+当前版本：0.1.1 开发原型。
+
 把 USB 连接的 Android 手机用作 Mac 触控板。原生 Android + Swift，无第三方运行时依赖。MIT 开源。
 
 **当前是开发原型。纯黑模式不是真正息屏：显示窗口保持活动，画面全黑、亮度降至最低，触摸继续工作。** 真正关屏后的触摸取决于手机硬件、驱动与系统权限，本项目不声称已实现。
@@ -13,7 +15,7 @@
 5. 单指移动、轻点左键、双指滚动、双指轻点右键、单指停住约半秒后拖动。
 6. 按一下手机电源键即停止控制并正常锁屏。切后台、返回、断线也会停止。重新解锁不会自动恢复控制。
 
-Mac 的实体 Option 键照常使用。手机默认启用「音量上键代替 Option」：按下发送 Option 按下，松开发送释放。它是否能唤起豆包取决于豆包当前的快捷键配置及其是否接收合成修饰键事件，需要在你的机器上验证。本项目不修改豆包设置。
+Mac 的实体 Option 键照常使用。手机默认启用「音量上键代替右 Option」：按下发送右 Option（键码 61）按下，松开发送释放。它是否能唤起豆包取决于豆包当前的快捷键配置及其是否接收合成修饰键事件，需要在你的机器上验证。本项目不修改豆包设置。
 
 语音采集由现有 Mac 豆包负责，手机端不录音。站得离 Mac 很远时，Mac 麦克风的收音距离仍是限制。
 
@@ -31,6 +33,18 @@ python3 scripts/connect-usb.py
 ```
 
 ADB 不在 PATH 时可设置 `ADB=/path/to/adb`。连接多部手机时显式设置 `ANDROID_SERIAL`。构建输出位于 `build/`。本地 APK 使用开发签名；Mac 应用为临时签名，尚未公证，不代表正式发布版本。
+
+### 小米等设备拦截 USB 安装时
+
+如果出现 `INSTALL_FAILED_USER_RESTRICTED`，可以手动安装，不必绕过系统限制：
+
+```bash
+adb push build/PocketTrack.apk /sdcard/Download/PocketTrack-v0.1.1.apk
+# 在手机文件管理器的 Download / 下载目录点开 APK，按系统提示安装
+python3 scripts/connect-usb.py --skip-install
+```
+
+若 Mac 设置里已开启辅助功能，但应用仍显示未授权，先退出并重开应用；开发版重新编译后可能需要在辅助功能列表移除旧项，再添加当前 `build/PocketTrack.app`。
 
 ## 停止与卸载
 
@@ -54,16 +68,25 @@ adb uninstall dev.pockettrack  # 只删除本应用及其配对信息
 
 ## 验证
 
-`tests/protocol_test.py` 只能对以 `--dry-run` 参数启动的接收端运行，测试不会注入鼠标或键盘输入。
+`tests/run-mac-tests.py` 在独立端口启动无界面的测试接收端，不注入鼠标或键盘输入。协议测试要求 `OK DRY` 握手，防止误向正常接收端发送测试输入。
 
 ```bash
-build/PocketTrack.app/Contents/MacOS/PocketTrack --self-test
-build/PocketTrack.app/Contents/MacOS/PocketTrack --dry-run
-# 在另一终端
-python3 tests/protocol_test.py
+python3 tests/run-mac-tests.py
+mkdir -p build/java-tests
+"$JAVA_HOME/bin/javac" -d build/java-tests android/src/dev/pockettrack/MotionBatch.java tests/MotionBatchTest.java
+"$JAVA_HOME/bin/java" -cp build/java-tests MotionBatchTest
 ```
 
 具体已验证内容和未验证边界见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+
+## 0.1.1 触控修复
+
+- 连续移动累计目标坐标，避免一批事件重复读取旧光标位置而丢位移。
+- 权限及显示器信息定时刷新，不再在每条移动命令上同步查询。
+- 心跳接收独立于发送线程，双端关闭 Nagle 延迟，合并相邻移动命令但保持点击和按键顺序。
+- 保留小数滚动量，避免微小的横向滚动被截断为零。
+- 手机正常触控界面显示 USB 心跳往返时间；它不是包含显示刷新在内的端到端触控延迟。
+- 音量上键发送右 Option，电源键/后台/断线退出逻辑保留。
 
 ## 类似开源项目
 
