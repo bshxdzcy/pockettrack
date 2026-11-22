@@ -10,7 +10,8 @@ mkdir -p build/android/classes build/android/dex
 "$JAVA_HOME/bin/javac" -encoding UTF-8 --release 8 -classpath "$ANDROID_JAR" -d build/android/classes android/src/dev/pockettrack/*.java
 "$JAVA_HOME/bin/jar" cf build/android/classes.jar -C build/android/classes .
 "$BT/d8" --lib "$ANDROID_JAR" --min-api 26 --output build/android/dex build/android/classes.jar
-"$BT/aapt2" link -I "$ANDROID_JAR" --manifest android/AndroidManifest.xml -o build/android/unsigned.apk
+"$BT/aapt2" compile --dir android/res -o build/android/resources.zip
+"$BT/aapt2" link -I "$ANDROID_JAR" --manifest android/AndroidManifest.xml -o build/android/unsigned.apk build/android/resources.zip
 (cd build/android/dex && zip -q -j ../unsigned.apk classes.dex)
 "$BT/zipalign" -f 4 build/android/unsigned.apk build/android/aligned.apk
 if [ ! -f build/debug.keystore ]; then

@@ -1,12 +1,26 @@
 # PocketTrack
 
-当前版本：Android 0.1.2 / Mac 0.1.1 开发原型。
+当前版本：Android 0.2.0 / Mac 0.1.1 开发原型。
 
-把 USB 连接的 Android 手机用作 Mac 触控板。原生 Android + Swift，无第三方运行时依赖。MIT 开源。
+把 USB 或蓝牙连接的 Android 手机用作 Mac 触控板。原生 Android + Swift，无第三方运行时依赖。MIT 开源。
 
 **当前是开发原型。纯黑模式不是真正息屏：显示窗口保持活动，画面全黑、亮度降至最低，触摸继续工作。** 真正关屏后的触摸取决于手机硬件、驱动与系统权限，本项目不声称已实现。
 
 ## 使用方式
+
+### 蓝牙（Android 9+，不需要 Mac 接收程序）
+
+1. 安装 Android APK，打开 PocketTrack，保持「使用蓝牙」开启，点击「连接蓝牙 Mac」。
+2. 允许「附近设备」，按系统提示开启蓝牙。选择已配对的 Mac，或「配对新的 Mac」。
+3. 首次配对时，允许手机被发现 120 秒；在 Mac「系统设置 → 蓝牙」连接这部手机，确认两端配对提示。手机可能以系统蓝牙名称显示。保持 PocketTrack 在前台。
+4. 页面显示「蓝牙已连接」后，点击「开始触控」或「开始纯黑触控」。此时不需要 USB，也不需要 Mac 辅助功能授权。
+5. 退出、锁屏或切后台会断开控制；重新打开后需要连接并主动开始，不会自动控制电脑。
+
+采用 Android 系统 Bluetooth HID Device，让 Mac 将手机识别为鼠标和键盘。鼠标移动、滚轮和右 Option 可传输；它不是 Apple 原生多点触控板，不能提供完整系统多指手势。蓝牙滚轮以步进单位传输，手感与 USB 的像素滚动不同。**0.2.0 已通过编译和报文测试，蓝牙真机配对、手感和豆包响应仍待验收。**
+
+### USB（Android 8+）
+
+在手机关闭「使用蓝牙」，然后：
 
 1. 用 USB 连接手机，在手机上允许这台 Mac 的 USB 调试。
 2. 编译两端，执行 `python3 scripts/connect-usb.py`。
@@ -15,7 +29,7 @@
 5. 单指移动、轻点左键、双指滚动、双指轻点右键、单指停住约半秒后拖动。
 6. 按一下手机电源键即停止控制并正常锁屏。切后台、返回、断线也会停止。重新解锁不会自动恢复控制。
 
-Mac 的实体 Option 键照常使用。手机默认启用「音量上键代替右 Option」：按下发送右 Option（键码 61）按下，松开发送释放。它是否能唤起豆包取决于豆包当前的快捷键配置及其是否接收合成修饰键事件，需要在你的机器上验证。本项目不修改豆包设置。
+Mac 的实体 Option 键照常使用。手机默认启用「音量上键代替右 Option」：按下发送右 Option，松开发送释放（USB 为 Mac 键码 61，蓝牙为 HID 右 Alt 修饰位）。它是否能唤起豆包取决于豆包当前的快捷键配置及其是否接收合成修饰键事件，需要在你的机器上验证。本项目不修改豆包设置。
 
 语音采集由现有 Mac 豆包负责，手机端不录音。站得离 Mac 很远时，Mac 麦克风的收音距离仍是限制。
 
@@ -39,7 +53,7 @@ ADB 不在 PATH 时可设置 `ADB=/path/to/adb`。连接多部手机时显式设
 如果出现 `INSTALL_FAILED_USER_RESTRICTED`，可以手动安装，不必绕过系统限制：
 
 ```bash
-adb push build/PocketTrack.apk /sdcard/Download/PocketTrack-v0.1.2.apk
+adb push build/PocketTrack.apk /sdcard/Download/PocketTrack-v0.2.0.apk
 # 在手机文件管理器的 Download / 下载目录点开 APK，按系统提示安装
 python3 scripts/connect-usb.py --skip-install
 ```
@@ -57,7 +71,10 @@ adb uninstall dev.pockettrack  # 只删除本应用及其配对信息
 
 ## 隐私与连接
 
-- APK 仅声明 `INTERNET` 普通权限，用于经 `adb reverse` 建立本地 TCP 连接；没有敏感运行时权限。
+- USB 使用 `INTERNET` 普通权限，经 `adb reverse` 建立本地 TCP 连接。
+- 蓝牙在 Android 12+ 按需申请 `BLUETOOTH_CONNECT` 与 `BLUETOOTH_ADVERTISE`（附近设备）；旧系统声明仅适用至 Android 11 的 `BLUETOOTH` / `BLUETOOTH_ADMIN`。不申请扫描或定位权限。
+- 仅在用户点击连接后列出已配对设备供选择；不扫描附近设备，不保存或上传设备列表。新配对由系统处理，手机可发现状态限时 120 秒。
+- 蓝牙输入仅在应用前台、已连接且用户点击开始后发送；没有后台服务。退出时发送按键释放并断开连接。
 - 不请求手机麦克风、相册、相机、联系人、短信、通知、悬浮窗、无障碍或存储权限。
 - 不读取手机剪贴板、不同步内容、不录制屏幕、不上传遥测。
 - Mac 接收端只绑定 `127.0.0.1:49671`，不向局域网开放。
@@ -73,12 +90,19 @@ adb uninstall dev.pockettrack  # 只删除本应用及其配对信息
 ```bash
 python3 tests/run-mac-tests.py
 mkdir -p build/java-tests
-"$JAVA_HOME/bin/javac" -d build/java-tests android/src/dev/pockettrack/MotionBatch.java tests/MotionBatchTest.java android/src/dev/pockettrack/MotionDynamics.java tests/MotionDynamicsTest.java
+"$JAVA_HOME/bin/javac" -d build/java-tests android/src/dev/pockettrack/MotionBatch.java tests/MotionBatchTest.java android/src/dev/pockettrack/MotionDynamics.java tests/MotionDynamicsTest.java android/src/dev/pockettrack/HidReports.java tests/HidReportsTest.java
 "$JAVA_HOME/bin/java" -cp build/java-tests MotionBatchTest
 "$JAVA_HOME/bin/java" -cp build/java-tests MotionDynamicsTest
+"$JAVA_HOME/bin/java" -cp build/java-tests HidReportsTest
 ```
 
 具体已验证内容和未验证边界见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+
+## 0.2.0 蓝牙与连接提示
+
+新增前台蓝牙鼠标/键盘通道，USB 保留。首页重排为连接、开始触控和快捷操作；速度、惯性和语音开关移入设置面板。加入自适应应用图标，普通触控区采用暗色点阵，纯黑模式仍不绘制内容。连接失败会在设置页显示原因；尚未连接时点击纯黑触控会提示先连接。USB 转发在拔插后可能消失，重新运行连接脚本即可恢复。
+
+Mac 应用保持 0.1.1，没有重新签名，避免让已授权用户重复处理辅助功能设置。
 
 ## 0.1.2 手感调节（仅更新 Android）
 
@@ -102,3 +126,5 @@ mkdir -p build/java-tests
 调研过 [Beckon](https://github.com/omsingh02/beckon)、[Sidecast](https://github.com/achreftlili/sidecast) 和 [KDE Connect](https://github.com/KDE/kdeconnect-kde)。它们覆盖无线触控、显示扩展或设备互联等方向。本项目为了 USB、最小手机权限和电源键退出这条流程独立实现，没有复制上述项目代码，也不是它们的分支。
 
 Android [保持屏幕活动](https://developer.android.com/develop/background-work/background-tasks/awake/screen-on) 和 [交互状态说明](https://developer.android.com/reference/android/os/PowerManager#isInteractive()) 解释了黑画面和系统休眠的区别。[scrcpy 的显示控制](https://github.com/Genymobile/scrcpy/blob/master/doc/device.md) 可在部分设备上控制屏幕电源，但并不保证手机自身触摸仍可用。
+
+蓝牙实现依据 Android 官方 [HID Device API](https://developer.android.com/reference/android/bluetooth/BluetoothHidDevice) 与[蓝牙权限说明](https://developer.android.com/develop/connectivity/bluetooth/bt-permissions)。系统要求 HID 应用在前台，切后台会取消注册。

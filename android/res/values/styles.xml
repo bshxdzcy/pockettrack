@@ -1,0 +1,13 @@
+<resources>
+    <color name="icon_background">#101411</color>
+    <style name="PocketTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#C7EB9F</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowBackground">#101411</item>
+        <item name="android:colorBackground">#101411</item>
+        <item name="android:navigationBarColor">#101411</item>
+        <item name="android:statusBarColor">#101411</item>
+    </style>
+</resources>

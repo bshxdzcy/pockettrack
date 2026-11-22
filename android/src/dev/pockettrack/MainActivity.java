@@ -1,6 +1,11 @@
 package dev.pockettrack;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.bluetooth.*;
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.content.*;
@@ -17,11 +22,16 @@ import java.util.concurrent.TimeUnit;
 public final class MainActivity extends Activity {
     private final Handler ui = new Handler();
     private Link link;
+    private BluetoothController bluetooth;
+    private boolean bluetoothMode=true, externalBluetoothDialog=false;
+    private static final int NEARBY=41, ENABLE_BT=42, DISCOVER_BT=43;
+    private BluetoothDevice selectedMac;
     private Pad activePad;
     private float pointerSpeed=4.0f, scrollSpeed=6.0f;
     private boolean momentum=true;
     private boolean active = false, dark = false, volumeOption = true;
     private TextView status;
+    private Button normalStart,darkStart;
     private String token = "";
     private final BroadcastReceiver screenOff = new BroadcastReceiver() {
         @Override public void onReceive(Context context, Intent intent) { stopMode(); }
@@ -32,6 +42,8 @@ public final class MainActivity extends Activity {
         pointerSpeed=getPreferences(0).getFloat("pointer_speed",4.0f);
         scrollSpeed=getPreferences(0).getFloat("scroll_speed",6.0f);
         momentum=getPreferences(0).getBoolean("momentum",true);
+        volumeOption=getPreferences(0).getBoolean("volume_option",true);
+        bluetoothMode=getPreferences(0).getBoolean("bluetooth_mode",true);
         acceptToken(getIntent());
         if (android.os.Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF), RECEIVER_NOT_EXPORTED);
         else registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF));
@@ -45,15 +57,20 @@ public final class MainActivity extends Activity {
             intent.removeExtra("token");
         }
     }
-    private TextView text(String value, int sp) {
-        TextView v = new TextView(this); v.setText(value); v.setTextSize(sp); v.setTextColor(Color.WHITE); v.setPadding(0, 16, 0, 16); return v;
-    }
-    private Button button(String label, Runnable action) {
-        Button b = new Button(this); b.setText(label); b.setOnClickListener(v -> action.run()); return b;
+    private TextView text(String value,int sp){return Ui.label(this,value,sp,Ui.TEXT,false);}
+    private Button button(String label,Runnable action){return Ui.button(this,label,false,action);}
+    private int dp(float value){return Ui.dp(this,value);}
+    private void fullButton(LinearLayout root,Button button){root.addView(button,new LinearLayout.LayoutParams(-1,-2));}
+    private void hint(LinearLayout root,String title,String detail){
+        LinearLayout row=new LinearLayout(this);row.setGravity(Gravity.CENTER_VERTICAL);
+        TextView name=Ui.label(this,title,14,Ui.TEXT,false);row.addView(name,new LinearLayout.LayoutParams(0,-2,1));
+        TextView value=Ui.label(this,detail,14,Ui.MUTED,false);value.setGravity(Gravity.END);row.addView(value);
+        root.addView(row);
     }
     private void speedSetting(LinearLayout root, String label, boolean pointer) {
         float value=pointer?pointerSpeed:scrollSpeed;
         TextView caption=text(String.format(Locale.US,"%s %.1f",label,value),15);root.addView(caption);
+        Ui.gap(root,12);
         SeekBar slider=new SeekBar(this);slider.setMax(pointer?75:150);slider.setProgress(Math.round((value-(pointer?0.5f:2.0f))*10));
         slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
             public void onStartTrackingTouch(SeekBar bar){}
@@ -64,32 +81,79 @@ public final class MainActivity extends Activity {
                 caption.setText(String.format(Locale.US,"%s %.1f",label,speed));
                 if(fromUser)getPreferences(0).edit().putFloat(pointer?"pointer_speed":"scroll_speed",speed).apply();
             }
-        });root.addView(slider);
+        });root.addView(slider);Ui.gap(root,24);
     }
     private void showSetup() {
         getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        WindowManager.LayoutParams attrs = getWindow().getAttributes(); attrs.screenBrightness = -1; attrs.preferredRefreshRate=0; getWindow().setAttributes(attrs);
+        WindowManager.LayoutParams attrs=getWindow().getAttributes();attrs.screenBrightness=-1;attrs.preferredRefreshRate=0;getWindow().setAttributes(attrs);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
-        LinearLayout root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setBackgroundColor(Color.rgb(18,22,30));
-        int p=(int)(24*getResources().getDisplayMetrics().density); root.setPadding(p,p*2,p,p);
-        root.addView(text("PocketTrack 0.1.2", 32));
-        root.addView(text("手机触控，Mac 接收。", 20));
-        status = text(token.isEmpty() ? "请在 Mac 运行连接脚本完成 USB 配对。" : "USB 已配对 · 点击下方开始", 15); root.addView(status);
-        root.addView(text("单指移动 · 轻点点击 · 双指滚动\n双指轻点右键 · 单指长按拖动\n电源键 / 返回 / 切后台：退出", 16));
-        CheckBox option = new CheckBox(this); option.setText("音量上键代替右 Option（按住说话）"); option.setTextColor(Color.WHITE); option.setChecked(volumeOption); option.setOnCheckedChangeListener((v,c)->volumeOption=c); root.addView(option);
-        speedSetting(root,"鼠标速度（慢滑精确，快滑加速）",true);
-        speedSetting(root,"双指滚动速度",false);
-        CheckBox inertia=new CheckBox(this);inertia.setText("惯性滚动（再次触摸立即停止）");inertia.setTextColor(Color.WHITE);inertia.setChecked(momentum);
-        inertia.setOnCheckedChangeListener((v,c)->{momentum=c;getPreferences(0).edit().putBoolean("momentum",c).apply();});root.addView(inertia);
-        root.addView(button("开始触控", () -> startMode(false)));
-        root.addView(button("开始纯黑触控", () -> startMode(true)));
-        root.addView(text("纯黑模式保留触摸，不是真正关屏。\n只经 USB 传输手势与按键；不访问手机麦克风、照片、联系人或通知。", 13));
-        ScrollView scroll = new ScrollView(this); scroll.addView(root); setContentView(scroll);
+        LinearLayout root=Ui.column(this);root.setPadding(dp(24),dp(16),dp(24),dp(20));root.setBackgroundColor(Ui.BG);
+        LinearLayout header=new LinearLayout(this);header.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout titles=Ui.column(this);titles.addView(Ui.label(this,"手机触控板",28,Ui.TEXT,true));Ui.gap(titles,7);titles.addView(Ui.label(this,"PocketTrack",13,Ui.MUTED,false));
+        header.addView(titles,new LinearLayout.LayoutParams(0,-2,1));
+        Button settings=button("设置",()->showSettings());header.addView(settings,new LinearLayout.LayoutParams(dp(72),dp(48)));root.addView(header);Ui.gap(root,28);
+
+        LinearLayout connection=Ui.column(this);connection.setPadding(dp(18),dp(18),dp(18),dp(18));connection.setBackground(Ui.shape(this,Ui.SURFACE,22,true));
+        connection.addView(Ui.label(this,"连接到 Mac",18,Ui.TEXT,true));Ui.gap(connection,16);
+        LinearLayout modes=new LinearLayout(this);modes.setPadding(dp(4),dp(4),dp(4),dp(4));modes.setBackground(Ui.shape(this,Ui.BG,14,false));
+        for(boolean wireless:new boolean[]{true,false}){
+            Button choice=Ui.button(this,wireless?"蓝牙":"USB",false,()->{if(bluetoothMode!=wireless){bluetoothMode=wireless;getPreferences(0).edit().putBoolean("bluetooth_mode",wireless).apply();stopMode();}});
+            choice.setMinHeight(dp(44));choice.setMinimumHeight(dp(44));choice.setTextSize(14);
+            choice.setTextColor(bluetoothMode==wireless?Ui.TEXT:Ui.MUTED);
+            choice.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x227E9982),Ui.shape(this,bluetoothMode==wireless?Ui.BORDER:Ui.BG,10,false),null));
+            choice.setSelected(bluetoothMode==wireless);choice.setContentDescription((wireless?"蓝牙":"USB")+(bluetoothMode==wireless?"，已选择":""));
+            modes.addView(choice,new LinearLayout.LayoutParams(0,-2,1));
+        }
+        connection.addView(modes);Ui.gap(connection,16);
+        String state=bluetoothMode?(bluetooth!=null && bluetooth.isConnected()?"蓝牙已连接，可以开始触控。":"无线连接，无需 USB 线。"):(token.isEmpty()?"先在 Mac 完成 USB 配对。":"USB 配对已保存，开始时连接。");
+        status=Ui.label(this,state,14,Ui.MUTED,false);status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);connection.addView(status);
+        if(bluetoothMode){Ui.gap(connection,14);Button connect=button("连接蓝牙 Mac",()->beginBluetooth());connect.setTextColor(Ui.ACCENT);fullButton(connection,connect);}
+        root.addView(connection);Ui.gap(root,24);
+
+        LinearLayout actions=Ui.column(this);actions.setGravity(Gravity.CENTER_HORIZONTAL);
+        Ui.Mark mark=new Ui.Mark(this);actions.addView(mark,new LinearLayout.LayoutParams(dp(76),dp(76)));Ui.gap(actions,10);
+        TextView ready=Ui.label(this,"把手机，变成触控板",21,Ui.TEXT,true);ready.setGravity(Gravity.CENTER);actions.addView(ready);Ui.gap(actions,7);
+        TextView sub=Ui.label(this,"单指移动 · 双指滚动",14,Ui.MUTED,false);sub.setGravity(Gravity.CENTER);actions.addView(sub);Ui.gap(actions,24);
+        normalStart=Ui.button(this,"开始触控",true,()->startMode(false));fullButton(actions,normalStart);Ui.gap(actions,10);
+        darkStart=button("纯黑触控",()->startMode(true));fullButton(actions,darkStart);Ui.gap(actions,10);
+        TextView blackHint=Ui.label(this,"全黑画面，触摸保持可用",12,Ui.MUTED,false);blackHint.setGravity(Gravity.CENTER);actions.addView(blackHint);
+        root.addView(actions);Ui.gap(root,24);Ui.line(root);
+        hint(root,"语音输入",volumeOption?"音量上键 → 右 Option":"已关闭，可在设置开启");Ui.gap(root,16);hint(root,"退出触控","按一下电源键");Ui.gap(root,24);
+        TextView footer=Ui.label(this,"只传手势与按键，不读取手机内容",12,Ui.MUTED,false);footer.setGravity(Gravity.CENTER);root.addView(footer);
+        ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.setBackgroundColor(Ui.BG);scroll.setClipToPadding(false);scroll.addView(root);
+        scroll.setOnApplyWindowInsetsListener((v,insets)->{
+            if(Build.VERSION.SDK_INT>=30){android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars()|WindowInsets.Type.displayCutout());v.setPadding(bars.left,bars.top,bars.right,bars.bottom);}
+            else v.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());
+            return insets;
+        });setContentView(scroll);scroll.requestApplyInsets();
+    }
+    private void showSettings(){
+        LinearLayout body=Ui.column(this);body.setPadding(dp(24),dp(24),dp(24),dp(28));
+        body.addView(Ui.label(this,"调成顺手的感觉",23,Ui.TEXT,true));Ui.gap(body,8);body.addView(Ui.label(this,"设置会自动保存在这部手机",13,Ui.MUTED,false));Ui.gap(body,28);
+        speedSetting(body,"鼠标速度",true);speedSetting(body,"滚动速度",false);
+        android.widget.Switch inertia=new android.widget.Switch(this);inertia.setText("惯性滚动");inertia.setTextColor(Ui.TEXT);inertia.setTextSize(16);inertia.setMinHeight(dp(48));inertia.setChecked(momentum);
+        inertia.setOnCheckedChangeListener((v,c)->{momentum=c;getPreferences(0).edit().putBoolean("momentum",c).apply();});body.addView(inertia);
+        body.addView(Ui.label(this,"松手继续滚动，再次触摸即停",13,Ui.MUTED,false));Ui.line(body);
+        android.widget.Switch option=new android.widget.Switch(this);option.setText("音量上键唤起语音");option.setTextColor(Ui.TEXT);option.setTextSize(16);option.setMinHeight(dp(48));option.setChecked(volumeOption);
+        option.setOnCheckedChangeListener((v,c)->{volumeOption=c;getPreferences(0).edit().putBoolean("volume_option",c).apply();});body.addView(option);
+        body.addView(Ui.label(this,"映射 Mac 右 Option，使用 Mac 麦克风",13,Ui.MUTED,false));Ui.line(body);
+        body.addView(Ui.label(this,"轻点点击 · 双指轻点右键\n长按拖动 · 返回或切后台退出",14,Ui.MUTED,false));Ui.gap(body,22);
+        body.addView(Ui.label(this,"纯黑不是关屏。蓝牙仅使用附近设备权限，不读取照片、联系人、定位或麦克风。",13,Ui.MUTED,false));Ui.gap(body,12);
+        body.addView(Ui.label(this,"PocketTrack 0.2.0",12,Ui.MUTED,false));
+        ScrollView scroll=new ScrollView(this);scroll.addView(body);
+        AlertDialog dialog=new AlertDialog.Builder(this).setView(scroll).setPositiveButton("完成",null).create();dialog.show();
+        if(dialog.getWindow()!=null){dialog.getWindow().setBackgroundDrawable(Ui.shape(this,Ui.SURFACE,24,false));dialog.getWindow().setLayout(-1,-2);dialog.getWindow().setGravity(Gravity.BOTTOM);}
     }
     private void startMode(boolean useDark) {
+        if(bluetoothMode){
+            if(bluetooth==null || !bluetooth.isConnected()){status.setText("请先点“连接蓝牙 Mac”，连接成功后再开始触控。");return;}
+            dark=useDark;activatePad();return;
+        }
+        if(link!=null)return;
         if(token.isEmpty()) { status.setText("请先在 Mac 运行连接脚本。"); return; }
         dark=useDark;
         status.setText("正在连接 Mac…");
+        normalStart.setEnabled(false);darkStart.setEnabled(false);
         if(link != null) link.close();
         Link next = new Link(token);
         link=next;
@@ -97,22 +161,32 @@ public final class MainActivity extends Activity {
     }
     private void enterPad(Link current) {
         if(link != current || isFinishing()) return;
+        activatePad();
+    }
+    private void activatePad() {
         active=true;
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         WindowManager.LayoutParams attrs=getWindow().getAttributes(); attrs.screenBrightness=dark ? 0.01f : -1; attrs.preferredRefreshRate=120; getWindow().setAttributes(attrs);
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN|View.SYSTEM_UI_FLAG_HIDE_NAVIGATION|View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
         activePad=new Pad();setContentView(activePad);
     }
-    private void send(String value) { if(active && link != null) link.send(value); }
+    private void send(String value) {
+        if(!active)return;
+        if(bluetoothMode){if(bluetooth!=null)bluetooth.send(value);}
+        else if(link!=null)link.send(value);
+    }
     private void stopMode() {
         active=false;
         if(activePad!=null){activePad.stopFling();activePad=null;}
         Link old=link; link=null;
         if(old!=null) old.close();
+        BluetoothController previous=bluetooth;bluetooth=null;if(previous!=null)previous.close();
         showSetup();
     }
-    @Override protected void onPause() { stopMode(); super.onPause(); }
-    @Override protected void onDestroy() { if(link!=null) link.close(); unregisterReceiver(screenOff); super.onDestroy(); }
+    @Override protected void onPause() { if(active || link!=null)stopMode(); super.onPause(); }
+    @Override protected void onStop() { if(!externalBluetoothDialog && bluetooth!=null)stopMode(); super.onStop(); }
+    @Override protected void onResume() { super.onResume();if(bluetooth!=null)bluetooth.ensureRegistered(); }
+    @Override protected void onDestroy() { if(link!=null)link.close();if(bluetooth!=null)bluetooth.close();unregisterReceiver(screenOff);super.onDestroy(); }
     @Override public void onBackPressed() { if(active) stopMode(); else super.onBackPressed(); }
     @Override public boolean onKeyDown(int code, KeyEvent event) {
         if(active && volumeOption && code==KeyEvent.KEYCODE_VOLUME_UP) { if(activePad!=null)activePad.stopFling(); if(event.getRepeatCount()==0) send("OPTION 1"); return true; }
@@ -121,6 +195,87 @@ public final class MainActivity extends Activity {
     @Override public boolean onKeyUp(int code, KeyEvent event) {
         if(active && volumeOption && code==KeyEvent.KEYCODE_VOLUME_UP) { send("OPTION 0"); return true; }
         return super.onKeyUp(code,event);
+    }
+    private BluetoothAdapter adapter(){
+        BluetoothManager manager=getSystemService(BluetoothManager.class);return manager==null?null:manager.getAdapter();
+    }
+    private boolean nearbyGranted(){
+        return Build.VERSION.SDK_INT<31 || (checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED && checkSelfPermission(Manifest.permission.BLUETOOTH_ADVERTISE)==PackageManager.PERMISSION_GRANTED);
+    }
+    private void beginBluetooth(){
+        if(Build.VERSION.SDK_INT<28){status.setText("蓝牙键鼠需要 Android 9 或更新版本；本机可以使用 USB。");return;}
+        if(bluetooth!=null){status.setText(bluetooth.isConnected()?"蓝牙已连接，可以开始触控。":"正在连接，请完成 Mac 上的配对；退出再进入可重试。");return;}
+        if(!nearbyGranted()){
+            new AlertDialog.Builder(this).setTitle("允许附近设备")
+                .setMessage("用于让 Mac 发现并连接这部手机，接收鼠标和右 Option 按键。不扫描周围设备，不读取定位、照片、联系人或麦克风。")
+                .setNegativeButton("取消",null).setPositiveButton("继续",(d,w)->{
+                    externalBluetoothDialog=true;
+                    requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT,Manifest.permission.BLUETOOTH_ADVERTISE},NEARBY);
+                }).show();return;
+        }
+        try {
+            BluetoothAdapter a=adapter();
+            if(a==null){status.setText("这部手机没有可用的蓝牙适配器。");return;}
+            if(!a.isEnabled()){
+                externalBluetoothDialog=true;startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE),ENABLE_BT);return;
+            }
+            chooseMac();
+        } catch(SecurityException error){status.setText("附近设备权限已变化，请重新点击连接。");}
+          catch(ActivityNotFoundException error){externalBluetoothDialog=false;status.setText("无法打开系统蓝牙界面，请手动开启蓝牙后重试。");}
+    }
+    private void chooseMac(){
+        java.util.ArrayList<BluetoothDevice> devices=new java.util.ArrayList<>(adapter().getBondedDevices());
+        String[] labels=new String[devices.size()+1];
+        for(int i=0;i<devices.size();i++){String name=devices.get(i).getName();labels[i]=(name==null?"已配对设备 "+(i+1):name);}
+        labels[devices.size()]="配对新的 Mac（让手机可被发现 120 秒）";
+        new AlertDialog.Builder(this).setTitle("选择你的 Mac").setItems(labels,(d,index)->{
+            if(index<devices.size()){selectedMac=devices.get(index);startBluetooth();}
+            else {
+                selectedMac=null;
+                try {
+                    externalBluetoothDialog=true;
+                    Intent request=new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);request.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION,120);
+                    startActivityForResult(request,DISCOVER_BT);
+                } catch(SecurityException | ActivityNotFoundException error){externalBluetoothDialog=false;status.setText("无法开启可发现状态，请检查附近设备权限和系统蓝牙设置。");}
+            }
+        }).setNegativeButton("取消",null).show();
+    }
+    private void startBluetooth(){
+        if(isFinishing() || !bluetoothMode)return;
+        status.setText("正在准备蓝牙键鼠…");
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        BluetoothController next=new BluetoothController(this,new BluetoothController.Listener(){
+            public void ready(BluetoothController who){
+                if(bluetooth!=who)return;
+                if(selectedMac!=null){status.setText("正在连接所选 Mac…");who.connect(selectedMac);}
+                else {status.setText("请在 Mac“系统设置 → 蓝牙”连接这部手机，并确认两端配对提示。请保持本页面打开。");who.waitForPairing();}
+            }
+            public void connected(BluetoothController who,BluetoothDevice device){
+                if(bluetooth!=who)return;
+                status.setText("蓝牙已连接 · 现在可以开始触控或纯黑触控，USB 可以拔掉。");
+            }
+            public void stopped(BluetoothController who,String reason){
+                if(bluetooth!=who)return;
+                bluetooth=null;stopMode();status.setText(reason);
+            }
+        });
+        bluetooth=next;next.start();
+    }
+    @Override public void onRequestPermissionsResult(int request,String[] permissions,int[] results){
+        super.onRequestPermissionsResult(request,permissions,results);
+        if(request!=NEARBY)return;externalBluetoothDialog=false;
+        if(nearbyGranted()){beginBluetooth();return;}
+        status.setText("未获得附近设备权限；仍可切换到 USB 使用。");
+        boolean blocked=false;
+        for(String permission:permissions)if(checkSelfPermission(permission)!=PackageManager.PERMISSION_GRANTED && !shouldShowRequestPermissionRationale(permission))blocked=true;
+        if(blocked)new AlertDialog.Builder(this).setTitle("蓝牙权限未开启").setMessage("如需蓝牙，可以在应用设置中手动允许“附近设备”。")
+            .setNegativeButton("暂不",null).setPositiveButton("应用设置",(d,w)->startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,android.net.Uri.parse("package:"+getPackageName())))).show();
+    }
+    @Override protected void onActivityResult(int request,int result,Intent data){
+        super.onActivityResult(request,result,data);
+        if(request==ENABLE_BT || request==DISCOVER_BT)externalBluetoothDialog=false;
+        if(request==ENABLE_BT){if(result==RESULT_OK)beginBluetooth();else status.setText("手机蓝牙未开启。");}
+        if(request==DISCOVER_BT){if(result>0)startBluetooth();else status.setText("已取消蓝牙配对。可以重试或切换 USB。");}
     }
     private final class Pad extends View {
         final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -143,14 +298,21 @@ public final class MainActivity extends Activity {
         int maximum;
         boolean drag, canceled;
         final Runnable hold=()-> { if(active && maximum==1 && travel<10 && !canceled) { drag=true; send("DRAG 1"); } };
-        Pad(){ super(MainActivity.this); setBackgroundColor(Color.BLACK); setContentDescription("PocketTrack 触控区域"); }
+        Pad(){ super(MainActivity.this); setBackgroundColor(dark?Color.BLACK:Ui.BG); setContentDescription("PocketTrack 触控区域"); }
         @Override protected void onDraw(Canvas canvas) {
             if(dark) return;
-            paint.setColor(Color.rgb(125,145,170)); paint.setTextSize(18*density);
-            canvas.drawText("PocketTrack · 触控中",24*density,80*density,paint);
-            paint.setTextSize(13*density);
-            canvas.drawText("电源键退出 · 单指移动 · 双指滚动",24*density,114*density,paint);
-            if(link!=null && link.roundTripMs>=0) canvas.drawText("USB 往返 " + link.roundTripMs + " ms · 音量上键 = 右 Option",24*density,144*density,paint);
+            paint.setColor(Ui.MUTED);paint.setTextSize(13*density);
+            canvas.drawText(bluetoothMode?"蓝牙已连接":"USB 已连接",24*density,64*density,paint);
+            paint.setColor(Ui.TEXT);paint.setTypeface(Typeface.create("sans-serif",Typeface.BOLD));paint.setTextSize(26*density);
+            canvas.drawText("触控中",24*density,105*density,paint);
+            paint.setTypeface(Typeface.create("sans-serif",Typeface.NORMAL));paint.setTextSize(14*density);paint.setColor(Ui.MUTED);
+            canvas.drawText("在任意位置滑动",24*density,137*density,paint);
+            paint.setColor(Ui.BORDER);
+            for(float px=24*density;px<getWidth()-16*density;px+=24*density)for(float py=184*density;py<getHeight()-140*density;py+=24*density)canvas.drawCircle(px,py,density,paint);
+            paint.setColor(Ui.MUTED);paint.setTextSize(13*density);
+            canvas.drawText("双指滚动 · 音量上键唤起语音",24*density,getHeight()-90*density,paint);
+            canvas.drawText("按一下电源键退出",24*density,getHeight()-60*density,paint);
+            if(link!=null && link.roundTripMs>=0){paint.setTextSize(11*density);canvas.drawText("USB 往返 "+link.roundTripMs+" ms",24*density,getHeight()-34*density,paint);}
             postInvalidateDelayed(500);
         }
         float cx(MotionEvent e) {float n=0; for(int i=0;i<e.getPointerCount();i++) n+=e.getX(i); return n/e.getPointerCount()/density;}
@@ -207,6 +369,7 @@ public final class MainActivity extends Activity {
         final ArrayBlockingQueue<String> queue=new ArrayBlockingQueue<>(128);
         final String secret;
         volatile boolean running=true;
+        String failure="连接已停止。请检查 USB 和 Mac 接收端。";
         volatile Socket socket;
         volatile long lastReply, pingSent;
         volatile long roundTripMs = -1;
@@ -260,11 +423,16 @@ public final class MainActivity extends Activity {
                         pingSent=now;out.write("PING\n");out.flush();lastPing=now;
                     }
                 }
-            } catch(Exception ignored) {
-                // No payloads, key values, or user data are logged.
+            } catch(Exception error) {
+                if(error instanceof ConnectException)failure="USB 通道不可用。重新插线后，需要在 Mac 恢复 USB 连接。";
+                else if(error instanceof SocketTimeoutException)failure="Mac 响应超时，请检查接收端是否正在运行。";
+                // Do not log payloads, keys, or exception text containing connection details.
             } finally {
                 close();
-                ui.post(()->{if(link==this){stopMode();status.setText("连接已停止。请检查 USB 和 Mac 接收端后重新开始。");}});
+                ui.post(()->{if(link==this){
+                    if(active)stopMode();else link=null;
+                    normalStart.setEnabled(true);darkStart.setEnabled(true);status.setText(failure);
+                }});
             }
         }
     }
