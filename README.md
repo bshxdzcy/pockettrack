@@ -1,6 +1,6 @@
 # PocketTrack
 
-当前版本：0.1.1 开发原型。
+当前版本：Android 0.1.2 / Mac 0.1.1 开发原型。
 
 把 USB 连接的 Android 手机用作 Mac 触控板。原生 Android + Swift，无第三方运行时依赖。MIT 开源。
 
@@ -39,7 +39,7 @@ ADB 不在 PATH 时可设置 `ADB=/path/to/adb`。连接多部手机时显式设
 如果出现 `INSTALL_FAILED_USER_RESTRICTED`，可以手动安装，不必绕过系统限制：
 
 ```bash
-adb push build/PocketTrack.apk /sdcard/Download/PocketTrack-v0.1.1.apk
+adb push build/PocketTrack.apk /sdcard/Download/PocketTrack-v0.1.2.apk
 # 在手机文件管理器的 Download / 下载目录点开 APK，按系统提示安装
 python3 scripts/connect-usb.py --skip-install
 ```
@@ -73,11 +73,20 @@ adb uninstall dev.pockettrack  # 只删除本应用及其配对信息
 ```bash
 python3 tests/run-mac-tests.py
 mkdir -p build/java-tests
-"$JAVA_HOME/bin/javac" -d build/java-tests android/src/dev/pockettrack/MotionBatch.java tests/MotionBatchTest.java
+"$JAVA_HOME/bin/javac" -d build/java-tests android/src/dev/pockettrack/MotionBatch.java tests/MotionBatchTest.java android/src/dev/pockettrack/MotionDynamics.java tests/MotionDynamicsTest.java
 "$JAVA_HOME/bin/java" -cp build/java-tests MotionBatchTest
+"$JAVA_HOME/bin/java" -cp build/java-tests MotionDynamicsTest
 ```
 
 具体已验证内容和未验证边界见 [docs/VERIFICATION.md](docs/VERIFICATION.md)。
+
+## 0.1.2 手感调节（仅更新 Android）
+
+手机设置页可分别调节鼠标和双指滚动速度，设置保存在应用私有数据中。默认鼠标基础倍率 4，随滑动速度平滑加速，最大约 11.2；默认滚动倍率 6。开启惯性滚动后松手继续减速滚动，再次触摸、按音量键或退出模式会停止惯性。
+
+应用窗口请求最高 120 Hz 刷新偏好，是否生效由设备决定。保持系统触摸批处理与重采样，不强制使用可能引入抖动的无缓冲输入模式。
+
+开发原型每两秒输出一次 `PocketTrackPerf` 性能日志，只包含心跳 RTT、队列长度、触摸分发耗时、socket 写入耗时与批次数，不包含坐标、按键值或用户内容。诊断时只读取本应用 PID 的该日志标签。
 
 ## 0.1.1 触控修复
 
