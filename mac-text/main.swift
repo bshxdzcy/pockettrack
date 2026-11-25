@@ -24,14 +24,15 @@ final class TextReceiver: NSObject,CBCentralManagerDelegate,CBPeripheralDelegate
         update?("正在准备蓝牙…")
         if central==nil {central=CBCentralManager(delegate:self,queue:.main)} else {centralManagerDidUpdateState(central)}
     }
+    func wake(){if enabled{start()}}
     func stop() {
         enabled=false;timeout?.invalidate();timeout=nil;central?.stopScan()
         if let peripheral {central?.cancelPeripheralConnection(peripheral)}
         peripheral=nil;characteristics.removeAll();authenticated=false;frames.reset();session.removeAll();key=nil
         update?("接收已停止")
     }
-    private func scan(){guard enabled,central.state == .poweredOn else{return};central.scanForPeripherals(withServices:[serviceID],options:[CBCentralManagerScanOptionAllowDuplicatesKey:false]);update?("等待手机：请打开 PocketTrack 的“手机语音”页面。")}
-    private func armTimeout(_ seconds: Double){timeout?.invalidate();timeout=Timer.scheduledTimer(withTimeInterval:seconds,repeats:false){[weak self] _ in self?.fail("连接超时，请在手机重新打开语音页面。",reject:false)}}
+    private func scan(){guard enabled,central.state == .poweredOn else{return};central.scanForPeripherals(withServices:[serviceID],options:[CBCentralManagerScanOptionAllowDuplicatesKey:false]);update?("自动接收已开启，等待手机进入触控页。")}
+    private func armTimeout(_ seconds: Double){timeout?.invalidate();timeout=Timer.scheduledTimer(withTimeInterval:seconds,repeats:false){[weak self] _ in self?.fail("连接超时，正在等待手机文字通道。",reject:false)}}
     private func fail(_ reason: String,reject: Bool=true){
         guard enabled else{return};timeout?.invalidate();timeout=nil
         if let p=peripheral {if reject{rejected.insert(p.identifier)};central.cancelPeripheralConnection(p)}
@@ -52,7 +53,7 @@ final class TextReceiver: NSObject,CBCentralManagerDelegate,CBPeripheralDelegate
         peripheral=p;p.delegate=self;central.stopScan();central.connect(p);armTimeout(15);update?("正在连接手机文字通道…")
     }
     func centralManager(_ central: CBCentralManager,didConnect p: CBPeripheral){guard enabled,p===peripheral else{return};p.discoverServices([serviceID])}
-    func centralManager(_ central: CBCentralManager,didFailToConnect p: CBPeripheral,error: Error?){guard p===peripheral else{return};fail("未能连接手机，请重新打开手机语音页面。",reject:false)}
+    func centralManager(_ central: CBCentralManager,didFailToConnect p: CBPeripheral,error: Error?){guard p===peripheral else{return};fail("未能连接手机，正在等待手机文字通道。",reject:false)}
     func centralManager(_ central: CBCentralManager,didDisconnectPeripheral p: CBPeripheral,error: Error?){
         guard enabled,p===peripheral else{return};peripheral=nil;authenticated=false;characteristics.removeAll();frames.reset();timeout?.invalidate();scan()
     }
@@ -109,20 +110,36 @@ final class TextReceiver: NSObject,CBCentralManagerDelegate,CBPeripheralDelegate
 final class AppDelegate: NSObject,NSApplicationDelegate {
     let receiver=TextReceiver()
     var window: NSWindow!,label: NSTextField!,testWindow: NSWindow?
+    var statusItem: NSStatusItem!
+    var wakeObserver: NSObjectProtocol?
     func applicationDidFinishLaunching(_ notification: Notification){
         let menu=NSMenu(),item=NSMenuItem();menu.addItem(item);let sub=NSMenu();sub.addItem(withTitle:"退出",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q");item.submenu=sub;NSApp.mainMenu=menu
         window=NSWindow(contentRect:NSRect(x:0,y:0,width:520,height:360),styleMask:[.titled,.closable,.miniaturizable],backing:.buffered,defer:false);window.title="PocketTrack · 手机文字"
         let stack=NSStackView();stack.orientation = .vertical;stack.alignment = .leading;stack.spacing=18;stack.translatesAutoresizingMaskIntoConstraints=false;window.contentView!.addSubview(stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo:window.contentView!.leadingAnchor,constant:28),stack.trailingAnchor.constraint(equalTo:window.contentView!.trailingAnchor,constant:-28),stack.topAnchor.constraint(equalTo:window.contentView!.topAnchor,constant:28)])
         let title=NSTextField(labelWithString:"在手机说话，在 Mac 输入。");title.font = .systemFont(ofSize:24,weight:.semibold);stack.addArrangedSubview(title)
-        label=NSTextField(wrappingLabelWithString:"点击开始接收，然后打开手机的“手机语音”。");stack.addArrangedSubview(label)
-        stack.addArrangedSubview(NSTextField(wrappingLabelWithString:"只接收配对手机主动发送的文字。\n发送会替换 Mac 剪贴板；不读取原剪贴板，不录音、不保存文字历史。\n保持本程序运行即可，无需辅助功能授权。"))
-        stack.addArrangedSubview(NSButton(title:"开始接收手机文字",target:self,action:#selector(start)))
+        label=NSTextField(wrappingLabelWithString:"正在自动连接手机…");stack.addArrangedSubview(label)
+        stack.addArrangedSubview(NSTextField(wrappingLabelWithString:"只接收配对手机主动发送的文字。\n发送会替换 Mac 剪贴板；不读取原剪贴板，不录音、不保存文字历史。\n关闭窗口仍会接收，可在菜单栏暂停或退出。"))
+        stack.addArrangedSubview(NSButton(title:"重新连接",target:self,action:#selector(start)))
         stack.addArrangedSubview(NSButton(title:"停止接收",target:self,action:#selector(stop)))
         stack.addArrangedSubview(NSButton(title:"打开测试输入框",target:self,action:#selector(test)))
         receiver.update = {[weak self] value in self?.label.stringValue=value}
-        window.center();window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)
+        statusItem=NSStatusBar.system.statusItem(withLength:NSStatusItem.variableLength)
+        statusItem.button?.title="PT";statusItem.button?.toolTip="PocketTrack 手机文字"
+        let statusMenu=NSMenu()
+        statusMenu.addItem(withTitle:"打开接收状态",action:#selector(showWindow),keyEquivalent:"").target=self
+        statusMenu.addItem(withTitle:"重新连接",action:#selector(start),keyEquivalent:"").target=self
+        statusMenu.addItem(withTitle:"暂停接收",action:#selector(stop),keyEquivalent:"").target=self
+        statusMenu.addItem(NSMenuItem.separator())
+        statusMenu.addItem(withTitle:"退出 PocketTrack 文字",action:#selector(NSApplication.terminate(_:)),keyEquivalent:"q")
+        statusItem.menu=statusMenu
+        wakeObserver=NSWorkspace.shared.notificationCenter.addObserver(forName:NSWorkspace.didWakeNotification,object:nil,queue:.main){[weak self] _ in self?.receiver.wake()}
+        window.isReleasedWhenClosed=false;window.center()
+        receiver.start()
+        if !CommandLine.arguments.contains("--background"){showWindow()}
     }
+    @objc func showWindow(){window.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
+    func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows:Bool)->Bool{showWindow();return true}
     @objc func start(){receiver.start()}
     @objc func stop(){receiver.stop()}
     @objc func test(){
@@ -131,7 +148,7 @@ final class AppDelegate: NSObject,NSApplicationDelegate {
         let text=NSTextView(frame:scroll.bounds);text.font = .systemFont(ofSize:20);text.isRichText=false;text.autoresizingMask=[.width];text.isVerticallyResizable=true;text.textContainer?.widthTracksTextView=true
         scroll.documentView=text;w.contentView!.addSubview(scroll);testWindow=w;w.center();w.makeKeyAndOrderFront(nil);w.makeFirstResponder(text)
     }
-    func applicationWillTerminate(_ notification: Notification){receiver.stop()}
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication)->Bool {true}
+    func applicationWillTerminate(_ notification: Notification){receiver.stop();if let wakeObserver{NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)}}
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication)->Bool {false}
 }
-let app=NSApplication.shared,delegate=AppDelegate();app.delegate=delegate;app.setActivationPolicy(.regular);app.run()
+let app=NSApplication.shared,delegate=AppDelegate();app.delegate=delegate;app.setActivationPolicy(.accessory);app.run()
