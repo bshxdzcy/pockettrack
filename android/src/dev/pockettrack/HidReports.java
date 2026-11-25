@@ -47,6 +47,10 @@ public final class HidReports {
                 buttons=previous;result.add(new Report(1,mouse(0,0,0,0)));break;
             case "DRAG":buttons=p[1].equals("1")?(buttons|1):(buttons&~1);result.add(new Report(1,mouse(0,0,0,0)));break;
             case "OPTION":modifiers=p[1].equals("1")?0x40:0;result.add(new Report(2,keyboard()));break;
+            case "PASTE":
+                // Fixed Command+V only; no arbitrary key/text injection through HID.
+                result.add(new Report(2,new byte[]{8,0,25,0,0,0,0,0}));
+                result.add(new Report(2,keyboard()));break;
             case "RESET":buttons=0;modifiers=0;moveX=moveY=wheelX=wheelY=0;result.add(new Report(1,mouse(0,0,0,0)));result.add(new Report(2,keyboard()));break;
             default:throw new IllegalArgumentException("Unsupported input command");
         }

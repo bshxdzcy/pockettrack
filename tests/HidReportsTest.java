@@ -24,6 +24,10 @@ public final class HidReportsTest {
         check(click.get(0).data[0]==3 && click.get(1).data[0]==1,"click preserves held drag");
         hid.apply("OPTION 1");List<HidReports.Report> reset=hid.apply("RESET");
         check(reset.size()==2 && zero(reset.get(0).data) && zero(reset.get(1).data),"release all on exit");
+        List<HidReports.Report> paste=hid.apply("PASTE");
+        check(paste.size()==2 && paste.get(0).id==2 && paste.get(0).data[0]==8 && paste.get(0).data[2]==25,"Command V only");
+        check(zero(paste.get(1).data),"paste releases all keys");
+        for(HidReports.Report r:paste)for(int i=2;i<8;i++)check(r.data[i]!=40,"paste never sends Return");
         // Parse HID short items independently: verify report widths and balanced collections.
         int size=0,count=0,id=0,collections=0;Map<Integer,Integer> bits=new HashMap<>();
         byte[] descriptor=HidReports.DESCRIPTOR;

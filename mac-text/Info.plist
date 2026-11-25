@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>PocketTrackText</string>
+<key>CFBundleIdentifier</key><string>dev.pockettrack.text</string>
+<key>CFBundleName</key><string>PocketTrack 文字接收器</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>通过蓝牙接收你在配对手机上主动发送的文字，用于在 Mac 粘贴。不会读取其他蓝牙设备内容。</string>
+</dict></plist>

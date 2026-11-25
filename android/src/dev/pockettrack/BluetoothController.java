@@ -22,7 +22,9 @@ public final class BluetoothController {
     private final Handler main=new Handler(Looper.getMainLooper());
     private final BluetoothAdapter adapter;
     private final HidReports reports=new HidReports();
-    private final ArrayBlockingQueue<String> queue=new ArrayBlockingQueue<>(128);
+    private static final class Command {final String text;final int epoch;Command(String text,int epoch){this.text=text;this.epoch=epoch;}}
+    private final ArrayBlockingQueue<Command> queue=new ArrayBlockingQueue<>(128);
+    private volatile int epoch=0;
     private volatile BluetoothHidDevice hid;
     private volatile BluetoothDevice peer;
     private BluetoothDevice requested;
@@ -70,17 +72,25 @@ public final class BluetoothController {
         } catch(SecurityException error){fail("附近设备权限已被撤销。");}
     }
     public void waitForPairing(){main.removeCallbacks(timeout);main.postDelayed(timeout,130000);}
-    public void send(String command){if(!isConnected())return;if(!queue.offer(command))fail("蓝牙发送队列拥堵，已停止控制。请重新连接。");}
+    public void send(String command){if(!isConnected())return;if(!queue.offer(new Command(command,epoch)))fail("蓝牙发送队列拥堵，已停止控制。请重新连接。");}
+    public void releaseInputs(){
+        synchronized(outputLock){
+            epoch++;queue.clear();
+            try {if(!closed && hid!=null && peer!=null && allowed())for(HidReports.Report report:reports.apply("RESET"))hid.sendReport(peer,report.id,report.data);}
+            catch(RuntimeException error){fail("释放按键时蓝牙已断开。");}
+        }
+    }
     private void startWriter(){
         writer=new Thread(()->{
             try {
                 while(!closed && peer!=null){
-                    String command=queue.poll(100,TimeUnit.MILLISECONDS);if(command==null)continue;
-                    MotionBatch batch=new MotionBatch();batch.add(command);
-                    for(int i=0;i<127;i++){String next=queue.poll();if(next==null)break;batch.add(next);}
+                    Command command=queue.poll(100,TimeUnit.MILLISECONDS);if(command==null || command.epoch!=epoch)continue;
+                    MotionBatch batch=new MotionBatch();batch.add(command.text);
+                    for(int i=0;i<127;i++){Command next=queue.peek();if(next==null || next.epoch!=command.epoch)break;queue.poll();batch.add(next.text);}
                     for(String line:batch.finish().split("\n")){
                         synchronized(outputLock){
                             if(closed)return;
+                            if(command.epoch!=epoch)break;
                             if(!allowed())throw new SecurityException();
                             for(HidReports.Report report:reports.apply(line)){
                                 BluetoothHidDevice service=hid;BluetoothDevice target=peer;

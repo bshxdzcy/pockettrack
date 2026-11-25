@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Pair only this app over ADB. Never enumerate or read phone user data."""
-import argparse, os, pathlib, shutil, subprocess, sys, time
+import argparse, hashlib, os, pathlib, shutil, subprocess, sys, time
 parser = argparse.ArgumentParser()
 parser.add_argument("--skip-install", action="store_true", help="Pair an app already installed manually on the phone")
 options = parser.parse_args()
@@ -47,4 +47,5 @@ subprocess.run(cmd + ['shell', 'am', 'force-stop', 'dev.pockettrack'], check=Tru
 result = subprocess.run(cmd + ['shell', 'am', 'start', '-n', 'dev.pockettrack/.MainActivity', '--es', 'token', token], text=True, capture_output=True)
 if result.returncode or 'Error' in result.stdout or 'Exception' in result.stderr:
     raise SystemExit('Could not start PocketTrack on phone. Check USB installation settings.')
-print('PocketTrack paired over USB. Tap Start on the phone.')
+print('Pairing fingerprint: ' + hashlib.sha256(token.encode()).hexdigest()[:12])
+print('If the phone asks, confirm only when this fingerprint matches. Then tap Start.')
